@@ -171,53 +171,113 @@ def score(row):
     return row
 
 def llm_message(row, client):
-    """Draft only. Never sends messages; label everything from a synthetic file."""
+    """Prepare advisor-focused outreach grounded in provided facts, not AI speculation.
+
+    The enrichment stage's freeform 'potential need' and 'outreach angle' fields are
+    intentionally NOT passed to the writer: they may contain speculative positioning
+    about AI software, which Equi does not sell.
+    """
     import json
+    import re
+
+    first_name = (row.get('primary_contact') or '').strip().split(' ')[0]
+    hypotheses = {}
+    for hypothesis in (
+        'ria_to_mfo', 'alternatives_expansion',
+        'investment_differentiation', 'infrastructure_gap'
+    ):
+        status = row.get(f'ai_{hypothesis}_status', '')
+        hypotheses[hypothesis] = {
+            'status': status,
+            'source_field': row.get(f'ai_{hypothesis}_source_field', ''),
+            'source_quote': (row.get(f'ai_{hypothesis}_quote', '')
+                             if status == 'INPUT_EXPLICIT' else ''),
+        }
 
     facts = {
         'firm': row['firm_name'],
         'firm_type': row['firm_type_normalized'],
-        'aum_usd': row['aum_usd'],
-        'contact': row['primary_contact'],
-        'title': row['title'],
-        'alternatives': row['alts_normalized'],
-        'client_size_usd': row['avg_client_usd'],
-        'crm_notes': row['notes'],
-        'buyer_motion': row['buyer_motion'],
-        'input_is_synthetic': row.get('data_source') == 'SYNTHETIC PROVIDED DATA',
-        'AI_analysis_is_not_external_research': True,
-        'potential_need_hypothesis': row.get('ai_potential_need'),
-        'opportunity_hypothesis': row.get('ai_opportunity_hypothesis'),
-        'evidence_basis': row.get('ai_evidence_basis'),
-        'buying_signal_basis': row.get('ai_buying_signal_basis'),
-        'buying_signal_quote_if_explicit_in_input': row.get('ai_signal_quote'),
-        'decision_maker_strategy': row.get('ai_decision_maker_strategy'),
-        'outreach_angle': row.get('ai_outreach_angle'),
-        'research_limitations': row.get('ai_research_limits'),
+        'contact_first_name': first_name,
+        'contact_title': row['title'],
+        'existing_alternatives': row.get('alts_normalized', ''),
+        'firm_notes_from_synthetic_CRM': row.get('notes', ''),
+        'buyer_motion': row.get('buyer_motion', ''),
+        'hypotheses_not_verified_web_research': hypotheses,
+        'no_external_company_research': True,
     }
-    instructions = (
-        'You draft accurate first-contact B2B emails for Equi, a partner to independent RIAs '
-        'and multi-family offices offering managed-risk evergreen liquid alternatives, '
-        'advisor-branded white-label fund-of-funds, and advisor client-facing materials. '
-        'Write a natural, specific, useful email body under 95 words addressed to the contact. '
-        'Use the outreach angle and decision-maker strategy from the structured enrichment '
-        'as an idea, not as a verified fact. Focus on the possible buyer challenge, then '
-        'ask a genuine question or offer a useful exchange, with a gentle CTA. '
-        'Do not quote AUM or client wealth in a creepy way. Do not invent events, websites, '
-        'people, meetings, intros, prior conversations, returns, investment terms or claims. '
-        'If notes mention a warm-intro contact, do not claim that person already introduced us. '
-        'Never claim an RIA is transitioning into an MFO unless the supplied CRM notes '
-        'explicitly state it; even then phrase it as internal, unverified information. '
-        'Never refer to unverified AI hypotheses as observed facts. '
-        'Never promise principal protection or daily redemption. '
-        'Output ONLY the email body, not a subject line.'
-    )
+
+    instructions = """You write concise, credible introductory B2B outreach on behalf of
+Equi to investment decision makers at independent RIAs and multi-family offices.
+
+ACTUAL EQUI OFFERING (this is the ONLY allowed positioning):
+- Evergreen managed-risk liquid alternative investment solutions intended to
+  complement an advisory firm's portfolio offering.
+- Equi-branded funds or firm-branded, white-label fund-of-funds solutions.
+- Client-facing investment education and marketing materials for advisors.
+- Equi is an investment partner, not an AI or software vendor.
+
+ABSOLUTE POSITIONING GUARDRAILS:
+- Never pitch AI tools, investment research software, reporting technology,
+  automation, monitoring platforms, operational efficiencies, workflows,
+  technology platforms, or outsourced research infrastructure.
+- Do not imply guaranteed downside protection, capital preservation,
+  daily redemption, or risk-free returns.
+- Do not claim relationships, customer examples, results, events, hiring,
+  MFO transitions or interest that the CRM does not explicitly support.
+- A status PLAUSIBLE_UNVERIFIED or NO_EVIDENCE is NOT a buying event.
+- If notes say 'warm intro via [person]', this only suggests a possible
+  introduction. Do not mention the introducer or imply a referral occurred.
+- Only claim an MFO transition if input CRM notes explicitly say one is
+  underway; do not present CRM information as publicly verified research.
+- Do not mention AUM, client wealth, or the contact's decision authority.
+- Treat all records as synthetic exercise data; never imply public research.
+
+EMAIL STYLE:
+- Address the prospect by first name. Natural, informed, direct, 55–90 words.
+- Open with ONE relevant known detail: current alternatives exposure, firm
+  type, or an explicitly described CRM business event. Do not presume pain.
+- Link that detail to ONE genuinely relevant Equi benefit. For example,
+  a firm with private credit exposure may want to DISCUSS whether a
+  complementary evergreen alternatives approach merits consideration.
+- If messaging a CIO at an MFO, emphasize investment fit and complementarity;
+  for a founder/principal, discuss strategic offering and client education;
+  for a research lead, focus on evaluation and due diligence.
+- One specific, respectful question or optional 15-minute meeting invitation.
+- No marketing platitudes, no fake social proof or name-dropping.
+- Return ONLY the email body, without a subject, placeholder signature, or
+  metadata. Include the greeting and end naturally.
+"""
+
+    def has_positioning_error(message):
+        prohibited = (
+            r'\bai\s+(?:tools?|software|platforms?|research|solutions?)\b',
+            r'\bartificial intelligence\b',
+            r'\b(?:research|monitoring|reporting)\s+(?:software|platforms?|tools?)\b',
+            r'\bautomation\b',
+            r'\bworkflow(?:s)?\b',
+            r'\b(?:we(?:\s+have|\'ve)?\s+worked\s+with)\b',
+            r'\bTory\b',
+        )
+        return any(re.search(pattern, message, re.IGNORECASE) for pattern in prohibited)
+
+    payload = json.dumps(facts, ensure_ascii=False)
     response = client.responses.create(
         model=os.getenv('OPENAI_MODEL', 'gpt-4.1-mini'),
         instructions=instructions,
-        input=json.dumps(facts, ensure_ascii=False),
+        input=payload,
     )
-    return response.output_text.strip()
+    draft = response.output_text.strip()
+    if has_positioning_error(draft):
+        # One targeted retry is cheaper than re-enriching the whole database.
+        response = client.responses.create(
+            model=os.getenv('OPENAI_MODEL', 'gpt-4.1-mini'),
+            instructions=instructions + '\nIMPORTANT: The prior draft incorrectly discussed technology, previous customers or an unverified introducer. Rewrite without ANY such claims.',
+            input=payload + '\nPrior draft to correct:\n' + draft,
+        )
+        draft = response.output_text.strip()
+    if not draft or has_positioning_error(draft):
+        raise ValueError('Outreach failed Equi positioning/grounding check')
+    return draft
 
 
 def parse_dollars(value):
